@@ -1,0 +1,106 @@
+---
+title: "ESS 330 Exercise 22"
+author: "Hanna Velicer"
+format: html
+execute:
+  echo: true
+---
+```{r}
+# Packages
+library(dataRetrieval) 
+library(dplyr)         
+library(tsibble)          
+library(timetk)         
+library(modeltime)       
+library(prophet)      
+library(fable)        
+library(fable.prophet)    
+library(ggplot2)        
+library(lubridate)
+library(tidymodels)
+library(ggplot2)
+library(plotly)
+
+# Exercise 21 code
+poudre_flow <- readNWISdv(siteNumber = "06752260",    
+                          parameterCd = "00060",      
+                          startDate = "2013-01-01",   
+                          endDate = "2023-12-31") %>% 
+  renameNWISColumns() %>%                              
+  mutate(Date = yearmonth(Date)) %>%                   
+  group_by(Date) %>%                                   
+  summarise(Flow = mean(Flow))
+
+poudre_tsb <- poudre_flow %>% 
+  as_tsibble(index = Date)
+
+timeser_plot <- ggplot(poudre_tsb, aes(x = Date, y = Flow)) +
+  geom_line(color = "purple") +
+  labs(title = "Streamflow",
+       y = "Flow", x = "Date") +
+  theme_minimal()
+
+ggplotly(timeser_plot)
+
+# Prophet model 
+pmod <- list(
+  prophet_reg() %>%
+    set_engine("prophet"),
+  arima_reg() %>% 
+    set_engine("auto_arima")
+)
+
+poudre_tsb$Date <- as.Date(poudre_tsb$Date)
+model <- map(pmod, ~ fit(.x, Flow ~ Date, data = poudre_tsb))
+
+table_model <- as_modeltime_table(model)
+
+# Forecast the next 12 months with modeltime
+future_months <- poudre_tsb %>% 
+  future_frame(Date, .length_out = "12 months")
+
+forecast <- table_model %>%
+  modeltime_forecast(
+    new_data    = future_months,
+    actual_data = poudre_tsb
+  ) %>%
+  filter(.key == "prediction") %>%
+  select(.model_id, Date = .index, Predicted = .value)
+
+# Streamflow data download and aggregate
+streamfl <- readNWISdv(
+    siteNumber  = "06752260",
+    parameterCd = "00060",
+    startDate   = "2024-01-01",
+    endDate     = "2024-12-31"
+  ) %>%
+  renameNWISColumns() %>%
+  mutate(
+    Date = as_date(Date),
+    Date = floor_date(Date, "month")
+  ) %>%
+  group_by(Date) %>%
+  summarise(Observed = mean(Flow, na.rm = TRUE), .groups = "drop")
+
+# R2
+compare <- forecast %>%
+  left_join(streamfl, by = "Date")
+
+r2_value <- summary(lm(Observed ~ Predicted, data = compare))$r.squared
+cat("R² = ", round(r2_value, 3),
+    " → ", round(r2_value * 100, 1),
+    "% of observed monthly variance explained by the forecasts.\n", sep = "")
+
+# Plot
+ggplot(compare, aes(x = Predicted, y = Observed, color = factor(.model_id))) +
+  geom_point(size = 2) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  geom_smooth(method = "lm", se = FALSE) +                    
+  labs(
+    title    = "Predicted vs. Observed Values",
+    x        = "Predicted (cfs)",
+    y        = "Observed (cfs)",
+    color    = "Model\nID"
+  ) +
+  theme_minimal()
+```
